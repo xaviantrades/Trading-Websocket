@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Market Prices — TradingView WebSocket</title>
+
+  <style>
+    :root {
+      --bg:#101820; --card:#202d38; --line:#2c3d4b;
+      --text:#ffffff; --muted:#b7c4cf; --accent:#65c8ff;
+      --up:#26c281; --down:#e8544a; --wait:#e8b93b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 20px;
+    }
+
+    h2 { color: var(--accent); margin: 0 0 12px; }
+    h3 { color: var(--accent); font-size: 15px; margin: 24px 0 8px; }
+
+    .status {
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: var(--card);
+      margin-bottom: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 22px;
+      align-items: center;
+      font-size: 14px;
+    }
+    .status strong { color: #fff; }
+
+    .dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: #888; display: inline-block; margin-right: 6px;
+    }
+    .dot.on   { background: var(--up); }
+    .dot.off  { background: var(--down); }
+    .dot.wait { background: var(--wait); }
+
+    .toolbar { margin-bottom: 16px; }
+
+    button {
+      padding: 11px 18px;
+      border: none;
+      border-radius: 6px;
+      margin: 0 6px 0 0;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    #connectBtn    { background: #1687e8; color: #fff; }
+    #disconnectBtn { background: #d84343; color: #fff; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+
+    #prices {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+      gap: 12px;
+    }
+
+    .price-card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 14px 16px;
+      border-radius: 8px;
+      transition: opacity .2s;
+    }
+    .price-card.stale { opacity: .55; }
+
+    .row {
+      display: flex; justify-content: space-between;
+      align-items: baseline; gap: 8px;
+    }
+
+    .symbol { font-size: 17px; font-weight: bold; letter-spacing: .5px; }
+
+    .badge {
+      font-size: 10px; padding: 2px 7px; border-radius: 10px;
+      background: #0d151c; color: var(--muted); border: 1px solid var(--line);
+      white-space: nowrap;
+    }
+
+    .name { color: var(--muted); font-size: 11.5px; margin-top: 3px; min-height: 14px; }
+
+    .price {
+      font-size: 26px; font-weight: bold; margin: 9px 0 6px;
+      font-variant-numeric: tabular-nums;
+    }
+    .price.up   { color: var(--up); }
+    .price.down { color: var(--down); }
+
+    .details {
+      color: var(--muted); font-size: 13px; line-height: 1.75;
+      font-variant-numeric: tabular-nums;
+    }
+    .details span { color: #e7eef5; }
+
+    #logs {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #080d12;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      max-height: 220px;
+      overflow-y: auto;
+      font-family: ui-monospace, Consolas, monospace;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h2>Live Market Prices</h2>
+
+  <div class="status">
+    <div><span id="dot" class="dot off"></span>Connection: <strong id="status">Disconnected</strong></div>
+    <div>Symbols live: <strong id="liveCount">0</strong> / <span id="totalCount">0</span></div>
+    <div>Last message: <strong id="lastMsg">--</strong></div>
+  </div>
+
+  <div class="toolbar">
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn">Disconnect</button>
+  </div>
+
+  <div id="prices"></div>
+
+  <h3>Connection Logs</h3>
+  <div id="logs">Ready to connect.</div>
+
+  <script>
+  /* =========================================================
+     1. SETTINGS
+     ========================================================= */
+
+  const TV_URL = "wss://data.tradingview.com/socket.io/websocket";
+
+  // Static contract specs — these never change, they are NOT prices.
+  const MARKET = [
+    { sym:'EURUSD', name:'Euro vs US Dollar',                digits:5, price:1.11990, spread:1,   contract:100000, usdBase:false },
+    { sym:'GBPUSD', name:'Great Britain Pound vs US Dollar', digits:5, price:1.33708, spread:0,   contract:100000, usdBase:false },
+    { sym:'USDCHF', name:'US Dollar vs Swiss Franc',         digits:5, price:0.82218, spread:2,   contract:100000, usdBase:true  },
+    { sym:'USDJPY', name:'US Dollar vs Japanese Yen',        digits:3, price:157.003, spread:2,   contract:100000, usdBase:true  },
+    { sym:'USDCNH', name:'US Dollar vs Chinese Yuan',        digits:5, price:6.67385, spread:12,  contract:100000, usdBase:true  },
+    { sym:'AUDUSD', name:'Australian Dollar vs US Dollar',   digits:5, price:0.70078, spread:1,   contract:100000, usdBase:false },
+    { sym:'NZDUSD', name:'New Zealand Dollar vs US Dollar',  digits:5, price:0.56781, spread:1,   contract:100000, usdBase:false },
+    { sym:'USDCAD', name:'US Dollar vs Canadian Dollar',     digits:5, price:1.40362, spread:1,   contract:100000, usdBase:true  },
+    { sym:'USDSEK', name:'US Dollar vs Swedish Krona',       digits:5, price:9.92560, spread:100, contract:100000, usdBase:true  },
+    { sym:'XAUUSD', name:'Gold vs US Dollar',                digits:2, price:2650.00, spread:25,  contract:100,    usdBase:false }
+  ];
+
+  // TradingView symbols to try, in order, for each market symbol.
+  // If the first one is rejected by the server, the next one is tried automatically.
+  const TV_CANDIDATES = {
+    EURUSD: ['FX:EURUSD'],
+    GBPUSD: ['FX:GBPUSD'],
+    USDCHF: ['FX:USDCHF'],
+    USDJPY: ['FX:USDJPY'],
+    USDCNH: ['FX:USDCNH', 'FX_IDC:USDCNH'],
+    AUDUSD: ['FX:AUDUSD'],
+    NZDUSD: ['FX:NZDUSD'],
+    USDCAD: ['FX:USDCAD'],
+    USDSEK: ['FX:USDSEK'],
+    XAUUSD: ['OANDA:XAUUSD', 'FX:XAUUSD', 'TVC:GOLD']
+  };
+
+  // Quote fields we ask TradingView for.
+  const FIELDS = [
+    'lp',            // last price
+    'bid',
+    'ask',
+    'ch',            // change vs previous close
+    'chp',           // change %
+    'open_price',
+    'high_price',
+    'low_price',
+    'update_mode'    // lets us detect delayed data
+  ];
+
+
+  /* =========================================================
+     2. MARKET STATE  (MAP / Q / reverse lookup)
+     ========================================================= */
+
+  const MAP    = {};   // MAP['EURUSD'] -> its definition (fast lookup)
+  const Q      = {};   // Q['EURUSD']   -> its LIVE quote { bid, ask, open, lo, hi, dir, time, ... }
+  const BY_TV  = {};   // BY_TV['FX:EURUSD'] -> 'EURUSD'
+
+  // Reverse lookup for every candidate TV symbol we might subscribe to.
+  Object.keys(TV_CANDIDATES).forEach(sym => {
+    TV_CANDIDATES[sym].forEach(tv => { BY_TV[tv] = sym; });
+  });
+
+  MARKET.forEach(m => {
+    m.point = Math.pow(10, -m.digits);      // smallest step, e.g. 0.00001
+    m.tv    = TV_CANDIDATES[m.sym][0];      // currently active TradingView symbol
+
+    MAP[m.sym] = m;
+
+    Q[m.sym] = {
+      bid:  m.price,                                        // seed until first tick
+      ask:  +(m.price + m.spread * m.point).toFixed(m.digits),
+      open: null, lo: null, hi: null,
+      ch:   null, chp: null,
+      dir:  0,          // 1 = last tick up, -1 = last tick down
+      time: null,       // Date of last update
+      live: false,      // true once a real tick has arrived
+      delayed: false
+    };
+  });
+
+
+  /* =========================================================
+     3. APP STATE + FEED + LOG
+     ========================================================= */
+
+  const State = {
+    watchlist: MARKET.map(m => m.sym),   // which symbols appear on screen
+    journal:   [],                       // log lines
+    attempts:  {},                       // sym -> index into TV_CANDIDATES
+    tvSymbols: {}                        // sym -> currently active TV symbol
+  };
+
+  MARKET.forEach(m => { State.tvSymbols[m.sym] = m.tv; });
+
+  function log(msg) {
+    const t = new Date();
+    State.journal.unshift({ t, msg });
+    if (State.journal.length > 500) State.journal.length = 500;
+
+    const el = document.getElementById('logs');
+    el.textContent += '\n' + t.toLocaleTimeString() + ' ' + msg;
+    el.scrollTop = el.scrollHeight;
+  }
+
+  log('Terminal started');
+
+  // Pages subscribe to be told when prices change.
+  const Feed = {
+    subs: new Set(),
+    on(fn) { this.subs.add(fn); return () => this.subs.delete(fn); },
+    emit() { this.subs.forEach(fn => fn()); }
+  };
+
+  // TradingView can push dozens of messages per second — coalesce them
+  // into one repaint per animation frame.
+  let renderQueued = false;
+  function scheduleRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => { renderQueued = false; Feed.emit(); });
+  }
+
+
+  /* =========================================================
+     4. SESSION GENERATOR
+     ========================================================= */
+
+  function randomSession(prefix) {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let result = prefix;
+    for (let i = 0; i < 12; i++) {
+      result += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return result;
+  }
+
+
+  /* =========================================================
+     5. MESSAGE FRAMING
+     ========================================================= */
+
+  function frame(payload) {
+    return `~m~${payload.length}~m~${payload}`;
+  }
+
+  function makeMessage(method, params) {
+    return frame(JSON.stringify({ m: method, p: params }));
+  }
+
+  function send(method, params) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      log('Cannot send "' + method + '": WebSocket is not open.');
+      return;
+    }
+    ws.send(makeMessage(method, params));
+  }
+
+
+  /* =========================================================
+     6. DECODE INCOMING FRAMES
+     ========================================================= */
+
+  function splitFrames(raw) {
+    const payloads = [];
+    let pos = 0;
+
+    while (pos < raw.length) {
+      const prefix = raw.slice(pos).match(/^~m~(\d+)~m~/);
+      if (!prefix) break;
+
+      const length = Number(prefix[1]);
+      const start  = pos + prefix[0].length;
+      const end    = start + length;
+
+      if (end > raw.length) break;   // wait for the rest of the frame
+
+      payloads.push(raw.slice(start, end));
+      pos = end;
+    }
+
+    return payloads;
+  }
+
+
+  /* =========================================================
+     7. CONNECT / DISCONNECT
+     ========================================================= */
+
+  let ws             = null;
+  let quoteSession   = null;
+  let manualClose    = false;
+  let reconnectTimer = null;
+  let reconnectTries = 0;
+  let lastMessageAt  = null;
+
+  function connect() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      log('Already connected or connecting.');
+      return;
+    }
+
+    clearTimeout(reconnectTimer);
+    manualClose  = false;
+    quoteSession = randomSession('qs_');
+    State.attempts = {};
+
+    // Reset every symbol back to its first candidate before subscribing.
+    MARKET.forEach(m => {
+      m.tv = TV_CANDIDATES[m.sym][0];
+      State.tvSymbols[m.sym] = m.tv;
+    });
+
+    setStatus('Connecting', 'wait');
+    log('Connecting to TradingView…');
+
+    try {
+      ws = new WebSocket(TV_URL);
+    } catch (err) {
+      setStatus('Error', 'off');
+      log('Connection error: ' + err.message);
+      return;
+    }
+
+    ws.addEventListener('open', () => {
+      reconnectTries = 0;
+      setStatus('Connected', 'on');
+      log('WebSocket connection opened.');
+
+      // Anonymous authentication.
+      send('set_auth_token', ['unauthorized_user_token']);
+
+      // Create quote session.
+      send('quote_create_session', [quoteSession]);
+
+      // Select fields before adding symbols.
+      send('quote_set_fields', [quoteSession, ...FIELDS]);
+
+      // Subscribe to symbols.
+      const subs = MARKET.map(m => m.tv);
+      send('quote_add_symbols', [quoteSession, ...subs]);
+
+      log('Subscribed: ' + subs.join(', '));
+    });
+
+    ws.addEventListener('message', event => handleMessage(String(event.data)));
+
+    ws.addEventListener('error', () => {
+      log('WebSocket error. Check the browser console.');
+    });
+
+    ws.addEventListener('close', event => {
+      ws = null;
+      setStatus('Disconnected', 'off');
+      log('Connection closed. Code: ' + event.code);
+
+      // Prices are no longer live.
+      MARKET.forEach(m => { Q[m.sym].live = false; });
+      scheduleRender();
+
+      if (!manualClose && reconnectTries < 10) {
+        reconnectTries++;
+        log('Reconnecting in 5s (attempt ' + reconnectTries + '/10)…');
+        reconnectTimer = setTimeout(connect, 5000);
+      }
+    });
+  }
+
+  function disconnect() {
+    manualClose = true;
+    clearTimeout(reconnectTimer);
+
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+
+    setStatus('Disconnected', 'off');
+    MARKET.forEach(m => { Q[m.sym].live = false; });
+    log('Disconnected by user.');
+    scheduleRender();
+  }
+
+
+  /* =========================================================
+     8. PROCESS MESSAGES
+     ========================================================= */
+
+  function handleMessage(raw) {
+    const payloads = splitFrames(raw);
+
+    for (const payload of payloads) {
+
+      // Heartbeat: echo the heartbeat payload back.
+      if (payload.startsWith('~h~')) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(frame(payload));
+        continue;
+      }
+
+      let data;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+
+      if (!data || !data.m) continue;
+
+      if (data.m === 'qsd') {
+        handleQuote(data.p);
+      }
+    }
+  }
+
+
+  /* =========================================================
+     9. PROCESS PRICE UPDATES  →  writes into Q[]
+     ========================================================= */
+
+  function toNum(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function handleQuote(params) {
+    if (!Array.isArray(params) || !params[1]) return;
+
+    const quote = params[1];
+    const tvSym = quote.n || '';
+    const sym   = BY_TV[tvSym] || tvSym;
+
+    // --- Server rejected / reported a problem with the symbol ---
+    if (quote.s !== 'ok') {
+      if (quote.s === 'error') {
+        log('Symbol rejected: ' + tvSym + (quote.errmsg ? ' (' + quote.errmsg + ')' : ''));
+        tryNextCandidate(sym);
+      } else {
+        log('Quote status "' + (quote.s || 'unknown') + '" for ' + tvSym);
+      }
+      return;
+    }
+
+    const m = MAP[sym];
+    if (!m) return;
+
+    const q = Q[sym];
+    const v = quote.v || {};
+
+    const prevMid = (q.bid != null && q.ask != null) ? (q.bid + q.ask) / 2 : null;
+
+    // --- Bid / Ask / Last ---
+    const bid = toNum(v.bid);
+    const ask = toNum(v.ask);
+    const lp  = toNum(v.lp);
+
+    if (bid != null)        q.bid = bid;
+    else if (lp != null)    q.bid = lp;                 // some feeds only send lp
+
+    if (ask != null)        q.ask = ask;
+    else if (q.bid != null) q.ask = q.bid + m.spread * m.point;   // synthetic spread
+
+    // --- Direction (for green/red colouring) ---
+    const mid = (q.bid != null && q.ask != null) ? (q.bid + q.ask) / 2 : q.bid;
+    if (mid != null && prevMid != null && Math.abs(mid - prevMid) > 1e-12) {
+      q.dir = mid > prevMid ? 1 : -1;
+    }
+
+    // --- Open / High / Low (fall back to local tracking if not supplied) ---
+    const open = toNum(v.open_price); if (open != null) q.open = open;
+
+    const hi = toNum(v.high_price);
+    const lo = toNum(v.low_price);
+
+    if (lo != null) q.lo = lo;
+    else if (q.bid != null) q.lo = (q.lo == null) ? q.bid : Math.min(q.lo, q.bid);
+
+    if (hi != null) q.hi = hi;
+    else if (q.ask != null) q.hi = (q.hi == null) ? q.ask : Math.max(q.hi, q.ask);
+
+    // --- Change ---
+    const ch  = toNum(v.ch);  if (ch  != null) q.ch  = ch;
+    const chp = toNum(v.chp); if (chp != null) q.chp = chp;
+
+    // --- Delayed-data flag ---
+    if (typeof v.update_mode === 'string') {
+      q.delayed = v.update_mode.indexOf('delayed') === 0;
+    }
+
+    q.time = new Date();
+    q.live = true;
+
+    lastMessageAt = q.time;
+    scheduleRender();
+  }
+
+  // First candidate did not work — subscribe to the next one.
+  function tryNextCandidate(sym) {
+    const m = MAP[sym];
+    const list = TV_CANDIDATES[sym];
+    if (!m || !list) return;
+
+    const next = (State.attempts[sym] || 0) + 1;
+
+    if (next >= list.length) {
+      log('No more TradingView symbols to try for ' + sym);
+      return;
+    }
+
+    State.attempts[sym] = next;
+
+    const tv = list[next];
+    m.tv = tv;
+    State.tvSymbols[sym] = tv;
+
+    log('Retrying ' + sym + ' as ' + tv);
+    send('quote_add_symbols', [quoteSession, tv]);
+    scheduleRender();
+  }
+
+
+  /* =========================================================
+     10. DISPLAY PRICES
+     ========================================================= */
+
+  function fmt(v, digits) {
+    if (v == null || !isFinite(v)) return '--';
+    return Number(v).toFixed(digits);
+  }
+
+  function fmtSigned(v, digits) {
+    if (v == null || !isFinite(v)) return '--';
+    const n = Number(v);
+    return (n > 0 ? '+' : '') + n.toFixed(digits);
+  }
+
+  function renderPrices() {
+    const container = document.getElementById('prices');
+    let liveCount = 0;
+
+    container.innerHTML = State.watchlist.map(sym => {
+      const m = MAP[sym];
+      const q = Q[sym];
+      const d = m.digits;
+
+      if (q.live) liveCount++;
+
+      const mid = (q.bid != null && q.ask != null)
+        ? (q.bid + q.ask) / 2
+        : (q.bid != null ? q.bid : q.ask);
+
+      const dirClass = q.dir > 0 ? 'up' : (q.dir < 0 ? 'down' : '');
+
+      const spreadPts = (q.bid != null && q.ask != null)
+        ? Math.round((q.ask - q.bid) / m.point)
+        : null;
+
+      const tickTime = q.time ? q.time.toLocaleTimeString() : '--';
+
+      return `
+        <div class="price-card${q.live ? '' : ' stale'}">
+          <div class="row">
+            <div class="symbol">${m.sym}</div>
+            <div class="badge">${State.tvSymbols[sym] || m.tv}</div>
+          </div>
+
+          <div class="name">${m.name}</div>
+
+          <div class="price ${dirClass}">${fmt(mid, d)}</div>
+
+          <div class="details">
+            Bid <span>${fmt(q.bid, d)}</span><br>
+            Ask <span>${fmt(q.ask, d)}</span><br>
+            Spread <span>${spreadPts == null ? '--' : spreadPts + ' pts'}</span><br>
+            Change <span>${fmtSigned(q.ch, d)} (${fmtSigned(q.chp, 2)}%)</span><br>
+            H / L <span>${fmt(q.hi, d)} / ${fmt(q.lo, d)}</span><br>
+            Tick <span>${tickTime}${q.delayed ? ' · delayed' : ''}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    document.getElementById('liveCount').textContent = liveCount;
+    document.getElementById('lastMsg').textContent =
+      lastMessageAt ? lastMessageAt.toLocaleTimeString() : '--';
+  }
+
+
+  /* =========================================================
+     11. STATUS, BUTTONS, BOOT
+     ========================================================= */
+
+  function setStatus(text, cls) {
+    document.getElementById('status').textContent = text;
+    document.getElementById('dot').className = 'dot ' + (cls || 'off');
+  }
+
+  Feed.on(renderPrices);                 // every price change repaints the grid
+
+  document.getElementById('totalCount').textContent = MARKET.length;
+  document.getElementById('connectBtn').addEventListener('click', connect);
+  document.getElementById('disconnectBtn').addEventListener('click', disconnect);
+
+  renderPrices();
+
+  // Auto-connect on load. Remove this line if you prefer a manual start.
+  connect();
+  </script>
+
+</body>
+</html>
